@@ -1,0 +1,113 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+    workflow_dispatch: # Allows for manual triggering of both jobs
+
+jobs:
+  build:
+    name: 'Deploy'
+    runs-on: ubuntu-latest
+
+    env:
+      ENVIRONMENT: production
+      AWS_REGION: 'eu-north-1'
+      ACCOUNT_ID: 'xxxxxxxxxxxxxxxx'
+      TF_VERSION: '1.4.0'
+      TFLINT_VERSION: '0.46.1'  
+      TFSEC_VERSION: '1.28.1' 
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          path: aws-lambda-cicd-pipeline
+
+      - name: Install Node.js 20.x for Lambda Packaging
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20.x'
+
+      - name: Print full path of lambda directory
+        run: |
+          echo "Current directory:"
+          pwd
+
+      - name: Print directory structure
+        run: |
+          echo "Directory structure:"
+          ls -R
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_PROD_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_PROD_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1
+
+      # Terraform Setup
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0 
+
+      - name: Terraform Init
+        working-directory: ./aws-lambda-cicd-pipeline/.ci
+        run: terraform init -backend-config="backend-${{ env.ENVIRONMENT }}.hcl"
+
+      - name: Print working directory
+        run: pwd
+
+      - name: Terraform Plan
+        working-directory: ./aws-lambda-cicd-pipeline/.ci
+        run: terraform plan
+
+      - name: Import existing IAM role (if exists)
+        working-directory: ./aws-lambda-cicd-pipeline/.ci
+        run: |
+          terraform import aws_iam_role.lambda_role lambda-execution-role || echo "IAM role already managed or does not exist"
+
+      - name: Terraform Apply
+        working-directory: ./aws-lambda-cicd-pipeline/.ci
+        run: terraform apply -var="environment=${{ env.ENVIRONMENT }}" -var="aws_region=${{ env.AWS_REGION }}" -var="account_id=${{ env.ACCOUNT_ID }}" -auto-approve
+
+      - name: Upload Terraform State
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-state
+          path: ./.ci/terraform.tfstate
+
+  terraform-cleanup:
+    name: 'Post Apply Cleanup'
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: 'eu-north-1'
+      TF_VERSION: '1.5.0'
+
+    steps:
+      - name: 'Checkout GitHub repository'
+        uses: actions/checkout@v2
+
+      - name: 'Configure AWS credentials'
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 'Set up Terraform'
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: 'Terraform Init'
+        run: terraform init
+
+      - name: 'Terraform Plan Destroy'
+        run: terraform plan -destroy -out=tfplan-destroy
+
+      - name: 'Terraform Apply Destroy'
+        run: terraform apply -auto-approve tfplan-destroy
